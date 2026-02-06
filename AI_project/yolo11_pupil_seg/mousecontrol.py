@@ -1,24 +1,30 @@
 import cv2
 import numpy as np
-import pyautogui
 from ultralytics import YOLO
 
-# ----------------------------
+# ============================
 # SETTINGS
-# ----------------------------
-MODEL_PATH = "yolo11m-seg-custom.pt"   # <-- change if your model is elsewhere
-CAMERA_INDEX = 0
+# ============================
+MODEL_PATH = "yolo11m-seg-custom.pt"
+
+EYE_CAM_INDEX = 1
+FRONT_CAM_INDEX = 2
+
 FRAME_W, FRAME_H = 640, 480
 
-# ----------------------------
-# Load YOLO model
-# ----------------------------
+# Front camera projection scale (tune this)
+SCALE_X = 2.5
+SCALE_Y = 2.5
+
+# ============================
+# LOAD MODEL
+# ============================
 model = YOLO(MODEL_PATH)
 
-# ----------------------------
-# Calibration storage
-# ----------------------------
-calibration = {
+# ============================
+# CALIBRATION STORAGE
+# ============================
+eye_calib = {
     "center": None,
     "left": None,
     "right": None,
@@ -26,117 +32,128 @@ calibration = {
     "down": None
 }
 
-calibrated = False
+eye_calibrated = False
+front_calibrated = False
+eye_center_ref = None  # reference pupil position for front cam
 
-# ----------------------------
-# Camera
-# ----------------------------
-cap = cv2.VideoCapture(CAMERA_INDEX)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+# ============================
+# CAMERAS
+# ============================
+eye_cap = cv2.VideoCapture(EYE_CAM_INDEX)
+front_cap = cv2.VideoCapture(FRONT_CAM_INDEX)
 
-screen_w, screen_h = pyautogui.size()
+eye_cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+eye_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
 
-print("\nCALIBRATION:")
-print("Look CENTER press 1")
-print("Look LEFT   press 2")
-print("Look RIGHT  press 3")
-print("Look UP     press 4")
-print("Look DOWN   press 5")
-print("Press Q to quit\n")
+front_cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+front_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
 
-prev_x, prev_y = 0, 0
+print("\n==== CONTROLS ====")
+print("1 : Look CENTER")
+print("2 : Look LEFT")
+print("3 : Look RIGHT")
+print("4 : Look UP")
+print("5 : Look DOWN")
+print("C : Calibrate front camera (look straight)")
+print("Q : Quit\n")
 
-# ----------------------------
-# Main loop
-# ----------------------------
+# ============================
+# MAIN LOOP
+# ============================
 while True:
-    ret, frame = cap.read()
-    if not ret:
+    ret_eye, eye_frame = eye_cap.read()
+    ret_front, front_frame = front_cap.read()
+
+    if not ret_eye or not ret_front:
+        print("Camera read failed")
         break
 
-    frame = cv2.resize(frame, (FRAME_W, FRAME_H))
-
-    # Run YOLO prediction
-    results = model.predict(frame, device="cpu", imgsz=320, conf=0.4, verbose=False)
+    eye_frame = cv2.resize(eye_frame, (FRAME_W, FRAME_H))
+    front_frame = cv2.resize(front_frame, (FRAME_W, FRAME_H))
 
     pupil = None
 
-    # If detection exists
+    # ---------- EYE TRACKING ----------
+    results = model.predict(eye_frame, imgsz=320, conf=0.4, verbose=False)
+
     if results[0].boxes and len(results[0].boxes) > 0:
-        box = results[0].boxes[0]  # take first detected object
-
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-        # Centroid
+        x1, y1, x2, y2 = map(int, results[0].boxes[0].xyxy[0])
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         pupil = (cx, cy)
 
-        # Draw box + center
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.rectangle(eye_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(eye_frame, pupil, 5, (0, 0, 255), -1)
 
-    # UI text
-    cv2.putText(frame, "1:C 2:L 3:R 4:U 5:D  Q:QUIT",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+    cv2.putText(
+        eye_frame,
+        "1:CENTER 2:L 3:R 4:U 5:D  C:FRONT CAL  Q:QUIT",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2
+    )
 
-    cv2.imshow("YOLO Eye Control", frame)
+    cv2.imshow("Eye Camera", eye_frame)
 
     key = cv2.waitKey(1) & 0xFF
 
-    # ---- Calibration keys ----
-    if key == ord('1') and pupil:
-        calibration["center"] = pupil
-        print("Center:", pupil)
+    # ---------- EYE CALIBRATION ----------
+    if pupil:
+        if key == ord('1'):
+            eye_calib["center"] = pupil
+            print("Eye Center:", pupil)
+        elif key == ord('2'):
+            eye_calib["left"] = pupil
+            print("Eye Left:", pupil)
+        elif key == ord('3'):
+            eye_calib["right"] = pupil
+            print("Eye Right:", pupil)
+        elif key == ord('4'):
+            eye_calib["up"] = pupil
+            print("Eye Up:", pupil)
+        elif key == ord('5'):
+            eye_calib["down"] = pupil
+            print("Eye Down:", pupil)
 
-    elif key == ord('2') and pupil:
-        calibration["left"] = pupil
-        print("Left:", pupil)
+    if all(eye_calib.values()):
+        eye_calibrated = True
 
-    elif key == ord('3') and pupil:
-        calibration["right"] = pupil
-        print("Right:", pupil)
+    # ---------- FRONT CAMERA CALIBRATION ----------
+    if key == ord('c') and pupil and eye_calibrated:
+        eye_center_ref = pupil
+        front_calibrated = True
+        print("Front camera calibrated at eye position:", pupil)
 
-    elif key == ord('4') and pupil:
-        calibration["up"] = pupil
-        print("Up:", pupil)
+    # ---------- GAZE → FRONT CAMERA ----------
+    if front_calibrated and pupil:
+        dx = pupil[0] - eye_center_ref[0]
+        dy = pupil[1] - eye_center_ref[1]
 
-    elif key == ord('5') and pupil:
-        calibration["down"] = pupil
-        print("Down:", pupil)
+        u = int(FRAME_W // 2 + dx * SCALE_X)
+        v = int(FRAME_H // 2 + dy * SCALE_Y)
 
-    elif key == ord('q'):
+        u = np.clip(u, 0, FRAME_W - 1)
+        v = np.clip(v, 0, FRAME_H - 1)
+
+        # Draw gaze crosshair
+        cv2.circle(front_frame, (u, v), 12, (0, 0, 255), 3)
+        cv2.line(front_frame, (u - 20, v), (u + 20, v), (0, 0, 255), 2)
+        cv2.line(front_frame, (u, v - 20), (u, v + 20), (0, 0, 255), 2)
+
+    else:
+        # Show center marker before calibration
+        cv2.circle(front_frame, (FRAME_W // 2, FRAME_H // 2), 6, (255, 0, 0), -1)
+
+    cv2.imshow("Front Camera (Gaze)", front_frame)
+
+    if key == ord('q'):
         break
 
-    # ---- Enable tracking after calibration ----
-    if all(calibration.values()):
-        calibrated = True
-
-    # ---- Mouse control using YOLO position ----
-    if calibrated and pupil:
-        lx, rx = calibration["left"][0], calibration["right"][0]
-        uy, dy = calibration["up"][1], calibration["down"][1]
-
-        # Clamp inside calibration region
-        x = np.clip(pupil[0], lx, rx)
-        y = np.clip(pupil[1], uy, dy)
-
-        # Normalize to screen size
-        mouse_x = int((x - lx) / (rx - lx) * screen_w)
-        mouse_y = int((y - uy) / (dy - uy) * screen_h)
-
-        # Smooth movement
-        smooth = 0.3
-        mouse_x = int(prev_x + smooth * (mouse_x - prev_x))
-        mouse_y = int(prev_y + smooth * (mouse_y - prev_y))
-
-        pyautogui.moveTo(mouse_x, mouse_y)
-
-        prev_x, prev_y = mouse_x, mouse_y
-
-# ----------------------------
-# Cleanup
-# ----------------------------
-cap.release()
+# ============================
+# CLEANUP
+# ============================
+eye_cap.release()
+front_cap.release()
 cv2.destroyAllWindows()
